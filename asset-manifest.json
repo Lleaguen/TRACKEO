@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/TRACKEO/static/css/main.53f1e216.css",
+    "main.js": "/TRACKEO/static/js/main.b7638638.js",
+    "index.html": "/TRACKEO/index.html",
+    "main.53f1e216.css.map": "/TRACKEO/static/css/main.53f1e216.css.map",
+    "main.b7638638.js.map": "/TRACKEO/static/js/main.b7638638.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.53f1e216.css",
+    "static/js/main.b7638638.js"
+  ]
+}
