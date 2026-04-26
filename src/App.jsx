@@ -4,12 +4,14 @@ import * as XLSX from 'xlsx';
 import { useExcel } from './hooks/useExcel';
 import { useTracking } from './hooks/useTracking';
 import { usePSS } from './hooks/usePSS';
+import { usePSSExistentes } from './hooks/usePSSExistentes';
 import { useFiltros } from './hooks/useFiltros';
 
 import FiltrosGenericos from './components/FiltrosGenericos';
 import Barcode from './components/Barcode';
 import ModalPSS from './components/ModalPSS';
 import ModalTrackear from './components/ModalTrackear';
+import ModalCoincidencias from './components/ModalCoincidencias';
 
 const TABS = ['Búsqueda', 'Tracking', 'PSS'];
 
@@ -17,12 +19,14 @@ export default function App() {
   const { data, semanas, cargarArchivo } = useExcel();
   const { trackeados, agregar: agregarTrackeados, eliminar: eliminarTrackeado, limpiar: limpiarTracking } = useTracking();
   const { pssList, agregar: agregarPss, eliminar: eliminarPss, limpiar: limpiarPss } = usePSS();
+  const { buscarCoincidencias, cargarArchivo: cargarPSSExistentes, hayDatos: hayPSSExistentes } = usePSSExistentes();
 
   const [semanaSeleccionada, setSemanaSeleccionada] = useState('');
   const [seleccionados, setSeleccionados] = useState(new Set());
   const [tabActiva, setTabActiva] = useState('Búsqueda');
   const [modalPSS, setModalPSS] = useState(false);
   const [modalTrackear, setModalTrackear] = useState(null);
+  const [modalCoincidencias, setModalCoincidencias] = useState(null);
 
   const filasBase = useMemo(() => data.filter(
     r => Number(r.Sem) === Number(semanaSeleccionada) &&
@@ -44,6 +48,27 @@ export default function App() {
     agregarTrackeados(modalTrackear, pssAsignado, agregarPss);
     setSeleccionados(new Set());
     setModalTrackear(null);
+    setTabActiva('Tracking');
+  };
+
+  const handleClickPendiente = (item) => {
+    if (!hayPSSExistentes) {
+      alert('Primero cargá el archivo de PSS existentes');
+      return;
+    }
+    const coincidencias = buscarCoincidencias(item.Descripciones, Number(semanaSeleccionada));
+    setModalCoincidencias({ item, coincidencias });
+  };
+
+  const handleAsignarPSS = (pssSeleccionado) => {
+    const { item } = modalCoincidencias;
+    // Usar el código PSS completo (ej: PSS123456)
+    const codigoPSS = pssSeleccionado.Codigo;
+    const numeroPSS = codigoPSS.replace('PSS', '');
+    
+    // Agregar a tracking con PSS asignado
+    agregarTrackeados([item], { 0: { numero: numeroPSS, codigo: codigoPSS } }, agregarPss);
+    setModalCoincidencias(null);
     setTabActiva('Tracking');
   };
 
@@ -73,11 +98,27 @@ export default function App() {
           onCerrar={() => setModalTrackear(null)}
         />
       )}
+      {modalCoincidencias && (
+        <ModalCoincidencias
+          item={modalCoincidencias.item}
+          coincidencias={modalCoincidencias.coincidencias}
+          onAsignar={handleAsignarPSS}
+          onCerrar={() => setModalCoincidencias(null)}
+        />
+      )}
 
       {/* Header */}
       <div className="bg-white rounded-2xl shadow p-4 mb-4 flex flex-wrap items-center gap-4">
         <h1 className="text-lg font-bold text-gray-800">Trackeo</h1>
-        <input type="file" accept=".xlsx,.xls,.xlsb" onChange={e => cargarArchivo(e.target.files[0])} className="text-sm" />
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-500">Excel principal:</label>
+          <input type="file" accept=".xlsx,.xls,.xlsb" onChange={e => cargarArchivo(e.target.files[0])} className="text-sm" />
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-gray-500">PSS existentes:</label>
+          <input type="file" accept=".xlsx,.xls,.xlsb" onChange={e => cargarPSSExistentes(e.target.files[0])} className="text-sm" />
+          {hayPSSExistentes && <span className="text-xs text-green-600">✓</span>}
+        </div>
         {semanas.length > 0 && (
           <select
             value={semanaSeleccionada}
@@ -167,13 +208,17 @@ export default function App() {
                     onChange={() => toggleSeleccion(i)}
                     className="mt-1 accent-blue-600 cursor-pointer shrink-0"
                   />
-                  <div>
-                    <p className="text-sm text-gray-700">{row.Descripciones}</p>
+                  <div 
+                    className="flex-1 cursor-pointer"
+                    onClick={() => handleClickPendiente(row)}
+                  >
+                    <p className="text-sm text-gray-700 hover:text-blue-600 transition-colors">{row.Descripciones}</p>
                     <p className="text-xs text-gray-400">
                       ID: {row.id}
                       {row['Fecha Inhub'] && (
                         <span className="ml-2">· Inhub: {XLSX.SSF.format('dd/mm/yyyy', row['Fecha Inhub'])}</span>
                       )}
+                      {hayPSSExistentes && <span className="ml-2 text-blue-500">· Click para buscar PSS</span>}
                     </p>
                   </div>
                 </div>
