@@ -37,6 +37,14 @@ export default function ModalCoincidencias({ item, coincidencias, onAsignar, onC
                           {pss.Codigo}
                         </span>
                         <span className="text-xs text-gray-400">Semana {pss.Semana}</span>
+                        {pss.IngresoJaula && (
+                          <span className="text-xs text-blue-500 bg-blue-50 px-2 py-0.5 rounded-full">
+                            Ingreso: {typeof pss.IngresoJaula === 'number' 
+                              ? new Date((pss.IngresoJaula - 25569) * 86400 * 1000).toLocaleDateString('es-AR')
+                              : pss.IngresoJaula
+                            }
+                          </span>
+                        )}
                         <span className="text-xs text-green-600 bg-green-50 px-2 py-0.5 rounded-full">
                           {Math.round(pss.score * 100)}% match
                         </span>

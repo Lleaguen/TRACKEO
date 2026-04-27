@@ -21,7 +21,9 @@ export function usePSSExistentes() {
       console.log('Ejemplo de datos:');
       console.log('- Codigo (col 2):', rows[0]?.Codigo || rows[0]?.['2']);
       console.log('- Semana (col 3):', rows[0]?.Semana || rows[0]?.['3']);
+      console.log('- Ingreso a Jaula (col 4):', rows[0]?.['Ingreso a Jaula'] || rows[0]?.['4']);
       console.log('- Descripcion (col 9):', rows[0]?.Descripcion || rows[0]?.['9']);
+      console.log('- SHIPMENT (col 1):', rows[0]?.SHIPMENT || rows[0]?.['1']);
       setPssExistentes(rows);
     };
     reader.readAsArrayBuffer(file);
@@ -30,10 +32,16 @@ export function usePSSExistentes() {
   const obtenerPorSemanas = (semanaActual) => {
     if (!semanaActual || !pssExistentes.length) return [];
     const semanaAnterior = semanaActual - 1;
-    // Usar los nombres correctos de las columnas
+    // Usar los nombres correctos de las columnas y filtrar PSS sin shipment
     return pssExistentes.filter(pss => {
       const semanaPss = pss.Semana || pss['3']; // Columna 3 = Semana
-      return !semanaPss || Number(semanaPss) === semanaActual || Number(semanaPss) === semanaAnterior;
+      const shipment = pss.SHIPMENT || pss['1']; // Columna 1 = SHIPMENT
+      
+      // Solo PSS sin shipment asignado (columna B vacía) y de semana actual/anterior
+      const sinShipment = !shipment || shipment.toString().trim() === '';
+      const semanaValida = !semanaPss || Number(semanaPss) === semanaActual || Number(semanaPss) === semanaAnterior;
+      
+      return sinShipment && semanaValida;
     });
   };
 
@@ -49,6 +57,7 @@ export function usePSSExistentes() {
         const descPss = (pss.Descripcion || pss['9'] || '').toLowerCase(); // Columna 9 = Descripcion
         const codigoPss = pss.Codigo || pss['2'] || ''; // Columna 2 = Codigo
         const semanaPss = pss.Semana || pss['3'] || semanaActual; // Columna 3 = Semana
+        const ingresoJaula = pss['Ingreso a Jaula'] || pss['4']; // Columna 4 = Ingreso a Jaula
         const coincidencias = palabras.filter(palabra => descPss.includes(palabra)).length;
         const score = coincidencias / palabras.length;
         return { 
@@ -56,7 +65,8 @@ export function usePSSExistentes() {
           score,
           Codigo: codigoPss, // Columna 2
           Descripcion: pss.Descripcion || pss['9'] || '', // Columna 9
-          Semana: semanaPss // Columna 3
+          Semana: semanaPss, // Columna 3
+          IngresoJaula: ingresoJaula // Columna 4 - Fecha de ingreso
         };
       })
       .filter(pss => pss.score > 0.3)
