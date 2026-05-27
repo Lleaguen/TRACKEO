@@ -1,7 +1,17 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 export default function ModalTrackear({ items, onConfirmar, onCerrar }) {
   const [pssAsignado, setPssAsignado] = useState({});
+
+  // ESC cierra, Enter confirma
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === 'Escape') onCerrar();
+      if (e.key === 'Enter' && e.ctrlKey) onConfirmar(pssAsignado);
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [pssAsignado, onCerrar, onConfirmar]);
 
   const setPss = (idx, numero) => {
     setPssAsignado(prev => ({

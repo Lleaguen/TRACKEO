@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, memo } from 'react';
 import * as XLSX from 'xlsx';
 
 import { useExcel } from './hooks/useExcel';
@@ -15,11 +15,86 @@ import ModalCoincidencias from './components/ModalCoincidencias';
 
 const TABS = ['Búsqueda', 'Tracking', 'PSS'];
 
+const RANGOS_PRECIO = [
+  { label: 'Todos',        min: null,    max: null    },
+  { label: '< $100k',     min: null,    max: 100000  },
+  { label: '< $500k',     min: null,    max: 500000  },
+  { label: '$500k – $1M', min: 500000,  max: 1000000 },
+  { label: '> $1M',       min: 1000000, max: null    },
+];
+
+// Virtualización simple: ventana de WINDOW_SIZE items centrada en el foco
+const WINDOW_SIZE = 60;
+
+function formatPrecio(val) {
+  if (val == null || val === '') return null;
+  const n = Number(String(val).replace(/[^0-9.,]/g, '').replace(',', '.'));
+  return isNaN(n) ? null : n;
+}
+
+function labelPrecio(val) {
+  if (val == null) return null;
+  if (val >= 1_000_000) return `$${(val / 1_000_000).toFixed(1)}M`;
+  if (val >= 1_000)     return `$${Math.round(val / 1_000)}k`;
+  return `$${val}`;
+}
+
+function matchColor(score) {
+  if (score >= 0.8) return 'bg-green-500';
+  if (score >= 0.5) return 'bg-yellow-400';
+  return 'bg-orange-400';
+}
+
+// Fila memoizada — solo re-renderiza si sus props cambian
+const FilaPendiente = memo(function FilaPendiente({ row, idx, isFocused, isSelected, onToggle, onClick }) {
+  const precio = formatPrecio(row['$']);
+  const score = row._matchScore;
+
+  return (
+    <div
+      className={`flex items-start gap-3 py-2 px-1 rounded transition-colors ${
+        isFocused ? 'bg-blue-50' : 'hover:bg-gray-50'
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={isSelected}
+        onChange={() => onToggle(idx)}
+        className="mt-1 accent-blue-600 cursor-pointer shrink-0"
+      />
+      <div className="flex-1 cursor-pointer min-w-0" onClick={() => onClick(row, idx)}>
+        <div className="flex items-start gap-2 flex-wrap">
+          <p className="text-sm text-gray-700 hover:text-blue-600 transition-colors flex-1 min-w-0">
+            {row.Descripciones}
+          </p>
+          {precio != null && (
+            <span className="shrink-0 text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 border border-emerald-200">
+              {labelPrecio(precio)}
+            </span>
+          )}
+          {score != null && (
+            <span className={`shrink-0 text-xs font-bold text-white px-2 py-0.5 rounded-full ${matchColor(score)}`}>
+              {Math.round(score * 100)}% match
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-gray-400 mt-0.5">
+          ID: {row.id}
+          {row.Sem && <span className="ml-2 font-medium text-gray-500">· Sem {row.Sem}</span>}
+          {row['Fecha Inhub'] && (
+            <span className="ml-2">· Inhub: {XLSX.SSF.format('dd/mm/yyyy', row['Fecha Inhub'])}</span>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+});
+
 export default function App() {
   const { data, semanas, cargarArchivo } = useExcel();
   const { trackeados, agregar: agregarTrackeados, eliminar: eliminarTrackeado, limpiar: limpiarTracking } = useTracking();
   const { pssList, agregar: agregarPss, eliminar: eliminarPss, limpiar: limpiarPss } = usePSS();
-  const { buscarCoincidencias, cargarArchivo: cargarPSSExistentes, hayDatos: hayPSSExistentes } = usePSSExistentes();
+  const { buscarCoincidencias, calcularScoresBatch, cargarArchivo: cargarPSSExistentes, hayDatos: hayPSSExistentes } = usePSSExistentes();
 
   const [semanaSeleccionada, setSemanaSeleccionada] = useState('');
   const [ultimas3, setUltimas3] = useState(false);
@@ -28,8 +103,11 @@ export default function App() {
   const [modalPSS, setModalPSS] = useState(false);
   const [modalTrackear, setModalTrackear] = useState(null);
   const [modalCoincidencias, setModalCoincidencias] = useState(null);
+  const [rangoPrecio, setRangoPrecio] = useState(0);
+  const [ordenarPorMatch, setOrdenarPorMatch] = useState(true);
+  const [filaFocused, setFilaFocused] = useState(0);
+  const listaRef = useRef(null);
 
-  // Últimas 3 semanas disponibles en el archivo
   const ultimas3Semanas = useMemo(() => semanas.slice(-3), [semanas]);
 
   const filasBase = useMemo(() => {
@@ -49,13 +127,86 @@ export default function App() {
   const { filtrosActivos, setFiltrosActivos, limpiar: limpiarFiltros, hayFiltrosActivos,
           gruposFiltros, filasFiltradas, busqueda, setBusqueda } = useFiltros(filasBase);
 
-  const toggleSeleccion = (idx) => {
+  // Filtro de precio
+  const filasConPrecio = useMemo(() => {
+    const rango = RANGOS_PRECIO[rangoPrecio];
+    if (rango.min == null && rango.max == null) return filasFiltradas;
+    return filasFiltradas.filter(row => {
+      const precio = formatPrecio(row['$']);
+      if (precio == null) return false;
+      if (rango.min != null && precio < rango.min) return false;
+      if (rango.max != null && precio >= rango.max) return false;
+      return true;
+    });
+  }, [filasFiltradas, rangoPrecio]);
+
+  // Scores calculados en batch — una sola pasada para todas las filas
+  const filasConScore = useMemo(() => {
+    if (!hayPSSExistentes) return filasConPrecio.map(r => ({ ...r, _matchScore: null }));
+    const semanaFija = ultimas3 ? null : (semanaSeleccionada ? Number(semanaSeleccionada) : null);
+    return calcularScoresBatch(filasConPrecio, semanaFija);
+  }, [filasConPrecio, hayPSSExistentes, calcularScoresBatch, ultimas3, semanaSeleccionada]);
+
+  // Ordenar por match si está activado
+  const filasOrdenadas = useMemo(() => {
+    if (!ordenarPorMatch) return filasConScore;
+    return [...filasConScore].sort((a, b) => (b._matchScore ?? -1) - (a._matchScore ?? -1));
+  }, [filasConScore, ordenarPorMatch]);
+
+  // Ventana virtual: solo renderizar WINDOW_SIZE filas alrededor del foco
+  const { ventana, offsetTop } = useMemo(() => {
+    const total = filasOrdenadas.length;
+    if (total <= WINDOW_SIZE) return { ventana: filasOrdenadas.map((r, i) => ({ row: r, idx: i })), offsetTop: 0 };
+    const start = Math.max(0, Math.min(filaFocused - Math.floor(WINDOW_SIZE / 2), total - WINDOW_SIZE));
+    const end = Math.min(start + WINDOW_SIZE, total);
+    return {
+      ventana: filasOrdenadas.slice(start, end).map((r, i) => ({ row: r, idx: start + i })),
+      offsetTop: start,
+    };
+  }, [filasOrdenadas, filaFocused]);
+
+  // Scroll al item enfocado
+  useEffect(() => {
+    if (!listaRef.current) return;
+    const localIdx = filaFocused - offsetTop;
+    const el = listaRef.current.children[localIdx];
+    if (el) el.scrollIntoView({ block: 'nearest' });
+  }, [filaFocused, offsetTop]);
+
+  // Teclado global
+  useEffect(() => {
+    const hayModal = modalPSS || modalTrackear || modalCoincidencias;
+    const handler = (e) => {
+      if (hayModal || tabActiva !== 'Búsqueda') return;
+      if (document.activeElement?.tagName === 'INPUT') return;
+
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setFilaFocused(i => Math.min(i + 1, filasOrdenadas.length - 1));
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setFilaFocused(i => Math.max(i - 1, 0));
+      } else if (e.key === 'Enter' && filasOrdenadas[filaFocused]) {
+        e.preventDefault();
+        handleClickPendiente(filasOrdenadas[filaFocused]);
+      } else if (e.key === ' ') {
+        e.preventDefault();
+        toggleSeleccion(filaFocused);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [tabActiva, filasOrdenadas, filaFocused, modalPSS, modalTrackear, modalCoincidencias]);
+
+  useEffect(() => { setFilaFocused(0); }, [filasOrdenadas.length, busqueda, rangoPrecio]);
+
+  const toggleSeleccion = useCallback((idx) => {
     setSeleccionados(prev => {
       const next = new Set(prev);
       next.has(idx) ? next.delete(idx) : next.add(idx);
       return next;
     });
-  };
+  }, []);
 
   const handleConfirmarTrackear = (pssAsignado) => {
     agregarTrackeados(modalTrackear, pssAsignado, agregarPss);
@@ -64,7 +215,8 @@ export default function App() {
     setTabActiva('Tracking');
   };
 
-  const handleClickPendiente = (item) => {
+  const handleClickPendiente = useCallback((item, idx) => {
+    if (idx !== undefined) setFilaFocused(idx);
     if (!hayPSSExistentes) {
       alert('Primero cargá el archivo de PSS existentes');
       return;
@@ -72,15 +224,12 @@ export default function App() {
     const semanaItem = ultimas3 ? Number(item.Sem) : Number(semanaSeleccionada);
     const coincidencias = buscarCoincidencias(item.Descripciones, semanaItem);
     setModalCoincidencias({ item, coincidencias });
-  };
+  }, [hayPSSExistentes, ultimas3, semanaSeleccionada, buscarCoincidencias]);
 
   const handleAsignarPSS = (pssSeleccionado) => {
     const { item } = modalCoincidencias;
-    // Usar el código PSS completo (ej: PSS123456)
     const codigoPSS = pssSeleccionado.Codigo;
     const numeroPSS = codigoPSS.replace('PSS', '');
-    
-    // Agregar a tracking con PSS asignado
     agregarTrackeados([item], { 0: { numero: numeroPSS, codigo: codigoPSS } }, agregarPss);
     setModalCoincidencias(null);
     setTabActiva('Tracking');
@@ -96,6 +245,11 @@ export default function App() {
     ), 'PSS');
     XLSX.writeFile(wb, `trackeo_sem${ultimas3 ? ultimas3Semanas.join('-') : (semanaSeleccionada || 'all')}.xlsx`);
   };
+
+  const cantConMatch = useMemo(
+    () => filasOrdenadas.filter(r => r._matchScore != null).length,
+    [filasOrdenadas]
+  );
 
   return (
     <div className="min-h-screen bg-gray-100 p-6">
@@ -218,55 +372,99 @@ export default function App() {
       {/* Tab: Búsqueda */}
       {tabActiva === 'Búsqueda' && (semanaSeleccionada || ultimas3) && (
         <div className="flex gap-4">
+          {/* Panel de filtros */}
           <div className="w-56 shrink-0 bg-white rounded-2xl shadow p-4">
             <div className="flex items-center justify-between mb-3">
               <span className="text-sm font-bold text-gray-700">Filtros</span>
-              {hayFiltrosActivos && (
-                <button onClick={limpiarFiltros} className="text-xs text-red-500 hover:underline">Limpiar</button>
+              {(hayFiltrosActivos || rangoPrecio !== 0) && (
+                <button
+                  onClick={() => { limpiarFiltros(); setRangoPrecio(0); }}
+                  className="text-xs text-red-500 hover:underline"
+                >
+                  Limpiar
+                </button>
               )}
             </div>
+
+            {/* Filtro de precio */}
+            <div className="border-b pb-3 mb-3">
+              <p className="text-xs font-semibold text-gray-600 mb-2">Precio ($)</p>
+              <div className="space-y-1">
+                {RANGOS_PRECIO.map((r, i) => (
+                  <label key={i} className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer hover:text-gray-900">
+                    <input
+                      type="radio"
+                      name="rangoPrecio"
+                      checked={rangoPrecio === i}
+                      onChange={() => setRangoPrecio(i)}
+                      className="accent-blue-600"
+                    />
+                    {r.label}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            {/* Ordenar por match */}
+            {hayPSSExistentes && (
+              <div className="border-b pb-3 mb-3">
+                <label className="flex items-center gap-2 text-xs text-gray-600 cursor-pointer hover:text-gray-900">
+                  <input
+                    type="checkbox"
+                    checked={ordenarPorMatch}
+                    onChange={e => setOrdenarPorMatch(e.target.checked)}
+                    className="accent-blue-600"
+                  />
+                  <span className="font-semibold">Matches primero</span>
+                </label>
+                <p className="text-xs text-gray-400 mt-1 pl-5">Los que tienen PSS similar aparecen arriba</p>
+              </div>
+            )}
+
             <FiltrosGenericos grupos={gruposFiltros} filtrosActivos={filtrosActivos} onChange={setFiltrosActivos} />
           </div>
 
-          <div className="flex-1 bg-white rounded-2xl shadow p-4">
-            <div className="flex items-center justify-between mb-3">
-              <p className="text-sm text-gray-500">{filasFiltradas.length} de {filasBase.length} resultados</p>
+          {/* Lista de pendientes */}
+          <div className="flex-1 bg-white rounded-2xl shadow p-4 flex flex-col">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm text-gray-500">
+                {filasOrdenadas.length} de {filasBase.length} resultados
+                {hayPSSExistentes && cantConMatch > 0 && (
+                  <span className="ml-2 text-xs text-green-600">· {cantConMatch} con match</span>
+                )}
+              </p>
               {seleccionados.size > 0 && (
                 <button
-                  onClick={() => setModalTrackear(filasFiltradas.filter((_, i) => seleccionados.has(i)))}
+                  onClick={() => setModalTrackear(filasOrdenadas.filter((_, i) => seleccionados.has(i)))}
                   className="bg-blue-600 text-white text-sm px-4 py-1.5 rounded-full hover:bg-blue-700"
                 >
                   Trackear {seleccionados.size} seleccionado{seleccionados.size > 1 ? 's' : ''}
                 </button>
               )}
             </div>
-            <div className="divide-y">
-              {filasFiltradas.map((row, i) => (
-                <div key={i} className="flex items-start gap-3 py-2 px-1 hover:bg-gray-50 rounded">
-                  <input
-                    type="checkbox"
-                    checked={seleccionados.has(i)}
-                    onChange={() => toggleSeleccion(i)}
-                    className="mt-1 accent-blue-600 cursor-pointer shrink-0"
+            <p className="text-xs text-gray-300 mb-2">↑↓ navegar · Enter abrir · Espacio seleccionar</p>
+
+            {/* Espaciador superior para simular scroll virtual */}
+            <div className="overflow-y-auto flex-1">
+              {offsetTop > 0 && (
+                <div style={{ height: offsetTop * 52 }} aria-hidden="true" />
+              )}
+              <div className="divide-y" ref={listaRef}>
+                {ventana.map(({ row, idx }) => (
+                  <FilaPendiente
+                    key={row.id ?? idx}
+                    row={row}
+                    idx={idx}
+                    isFocused={idx === filaFocused}
+                    isSelected={seleccionados.has(idx)}
+                    onToggle={toggleSeleccion}
+                    onClick={handleClickPendiente}
                   />
-                  <div 
-                    className="flex-1 cursor-pointer"
-                    onClick={() => handleClickPendiente(row)}
-                  >
-                    <p className="text-sm text-gray-700 hover:text-blue-600 transition-colors">{row.Descripciones}</p>
-                    <p className="text-xs text-gray-400">
-                      ID: {row.id}
-                      {row.Sem && (
-                        <span className="ml-2 font-medium text-gray-500">· Sem {row.Sem}</span>
-                      )}
-                      {row['Fecha Inhub'] && (
-                        <span className="ml-2">· Inhub: {XLSX.SSF.format('dd/mm/yyyy', row['Fecha Inhub'])}</span>
-                      )}
-                      {hayPSSExistentes && <span className="ml-2 text-blue-500">· Click para buscar PSS</span>}
-                    </p>
-                  </div>
-                </div>
-              ))}
+                ))}
+              </div>
+              {offsetTop + WINDOW_SIZE < filasOrdenadas.length && (
+                <div style={{ height: (filasOrdenadas.length - offsetTop - WINDOW_SIZE) * 52 }} aria-hidden="true" />
+              )}
             </div>
           </div>
         </div>
