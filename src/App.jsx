@@ -482,33 +482,29 @@ export default function App() {
           {trackeados.length === 0 ? (
             <p className="text-sm text-gray-400">No hay items trackeados aún.</p>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-500 border-b">
-                  <th className="pb-2 pr-4 font-medium">Shipment ID</th>
-                  <th className="pb-2 font-medium">Descripción</th>
-                  <th className="pb-2 font-medium">PSS</th>
-                  <th className="pb-2" />
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {trackeados.map((row, i) => (
-                  <tr key={i} className="hover:bg-gray-50">
-                    <td className="py-2 pr-4 text-gray-500 whitespace-nowrap">{row.id}</td>
-                    <td className="py-2 text-gray-700">{row.Descripciones}</td>
-                    <td className="py-2">
-                      {row.pss
-                        ? <span className="text-xs font-mono text-orange-500 bg-orange-50 px-2 py-0.5 rounded-full">{row.pss.codigo}</span>
-                        : <span className="text-xs text-gray-300">—</span>
-                      }
-                    </td>
-                    <td className="py-2 pl-4">
-                      <button onClick={() => eliminarTrackeado(row.id)} className="text-xs text-red-400 hover:text-red-600">✕</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <div className="divide-y">
+              {trackeados.map((row, i) => (
+                <div key={i} className="flex items-start gap-6 py-4">
+                  {/* Barcode del Shipment ID */}
+                  <div className="shrink-0">
+                    <Barcode value={String(row.id)} />
+                  </div>
+                  {/* Info */}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-gray-700 mb-1">{row.Descripciones}</p>
+                    <p className="text-xs text-gray-400">
+                      Sem {row.Sem}
+                      {row.pss && (
+                        <span className="ml-2 font-mono text-orange-500 bg-orange-50 px-2 py-0.5 rounded-full">
+                          {row.pss.codigo}
+                        </span>
+                      )}
+                    </p>
+                  </div>
+                  <button onClick={() => eliminarTrackeado(row.id)} className="text-xs text-red-400 hover:text-red-600 shrink-0 mt-1">✕</button>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

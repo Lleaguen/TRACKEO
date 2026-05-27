@@ -16,7 +16,7 @@ export default function ModalTrackear({ items, onConfirmar, onCerrar }) {
   const setPss = (idx, numero) => {
     setPssAsignado(prev => ({
       ...prev,
-      [idx]: numero ? { numero, codigo: `PSS${numero}` } : null,
+      [idx]: numero ? { numero, codigo: `PSS${numero}`, _esNuevo: true } : null,
     }));
   };
 

@@ -1,11 +1,72 @@
-import { useState, useMemo, useRef } from 'react';
+import { useState, useMemo } from 'react';
 import * as XLSX from 'xlsx';
 import { fixRow } from '../utils/fixEncoding';
 
-// Pre-tokeniza una descripción en palabras útiles (>2 chars)
-function tokenizar(desc) {
-  return String(desc == null ? '' : desc).toLowerCase().split(/\s+/).filter(p => p.length > 2);
+// ─── Normalización ────────────────────────────────────────────────────────────
+
+function normalizar(str) {
+  return String(str == null ? '' : str)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')  // quita acentos: ó→o, á→a, etc.
+    .replace(/[^a-z0-9\s]/g, ' ')    // símbolos y puntuación → espacio
+    .replace(/\s+/g, ' ')
+    .trim();
 }
+
+const STOPWORDS = new Set([
+  'de','del','la','las','el','los','un','una','unos','unas',
+  'en','con','por','para','sin','sobre','entre','hasta','desde',
+  'que','como','mas','pero','sus','les','nos','fue',
+  'ser','han','hay','son','era','este','esta','estos','estas',
+  'ese','esa','esos','esas','muy','bien','mal','menos',
+  'todo','toda','todos','todas','cada','otro','otra','otros','otras',
+]);
+
+function tokenizar(desc) {
+  return normalizar(desc)
+    .split(/\s+/)
+    .filter(p => p.length > 2 && !STOPWORDS.has(p));
+}
+
+// ─── Score ────────────────────────────────────────────────────────────────────
+
+// Reglas:
+// 1. Match exacto → 1.0 punto
+// 2. Containment bidireccional SOLO si ambos tokens tienen ≥5 chars → 0.7 puntos
+//    (evita que "pan" matchee "pantalon", "par" matchee "paraguas", etc.)
+// 3. Score final = suma_hits / cantidad_tokens_query
+// 4. Umbral: > 0.45 para mostrar badge, > 0.35 para ordenar
+
+function calcularScore(tokensQuery, tokensPss) {
+  if (!tokensQuery.length || !tokensPss.length) return 0;
+
+  const setPss = new Set(tokensPss);
+  let hits = 0;
+
+  for (const t of tokensQuery) {
+    if (setPss.has(t)) {
+      hits += 1.0;
+      continue;
+    }
+    // Containment solo para tokens suficientemente largos (≥5 chars)
+    // para evitar falsos positivos con palabras cortas
+    if (t.length >= 5) {
+      const partial = tokensPss.find(tp => tp.length >= 5 && (tp.includes(t) || t.includes(tp)));
+      if (partial) {
+        hits += 0.7;
+        continue;
+      }
+    }
+  }
+
+  return hits / tokensQuery.length;
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+
+const UMBRAL_BADGE  = 0.45;  // mínimo para mostrar badge en la lista
+const UMBRAL_MODAL  = 0.35;  // mínimo para aparecer en el modal de coincidencias
 
 export function usePSSExistentes() {
   const [pssExistentes, setPssExistentes] = useState([]);
@@ -26,7 +87,7 @@ export function usePSSExistentes() {
     reader.readAsArrayBuffer(file);
   };
 
-  // Índice pre-computado: Map<semana, PSS[]> — se recalcula solo cuando cambia pssExistentes
+  // Índice pre-computado por semana — tokens calculados una sola vez al cargar
   const indicePorSemana = useMemo(() => {
     const idx = new Map();
     for (const pss of pssExistentes) {
@@ -35,38 +96,27 @@ export function usePSSExistentes() {
       const sinShipment = !shipment || String(shipment).trim() === '';
       if (!sinShipment) continue;
 
-      // Normalizar campos una sola vez
-      const normalizado = {
+      const descRaw = pss.Descripcion || pss['9'] || '';
+      const entry = {
         ...pss,
-        Codigo: pss.Codigo || pss['2'] || '',
-        Descripcion: pss.Descripcion || pss['9'] || '',
-        Semana: semana,
+        Codigo:       pss.Codigo || pss['2'] || '',
+        Descripcion:  descRaw,
+        Semana:       semana,
         IngresoJaula: pss['Ingreso a Jaula'] || pss['4'],
-        _tokens: tokenizar(pss.Descripcion || pss['9'] || ''),
+        _tokens:      tokenizar(descRaw),
       };
 
       if (!idx.has(semana)) idx.set(semana, []);
-      idx.get(semana).push(normalizado);
+      idx.get(semana).push(entry);
     }
     return idx;
   }, [pssExistentes]);
 
-  // Obtener PSS disponibles para una semana (actual + anterior)
   const obtenerPorSemanas = (semanaActual) => {
     if (!semanaActual) return [];
-    const actual = indicePorSemana.get(Number(semanaActual)) || [];
+    const actual   = indicePorSemana.get(Number(semanaActual))     || [];
     const anterior = indicePorSemana.get(Number(semanaActual) - 1) || [];
     return [...actual, ...anterior];
-  };
-
-  // Calcula score entre tokens de búsqueda y tokens pre-computados del PSS
-  const calcularScore = (tokensQuery, tokensPss) => {
-    if (!tokensQuery.length || !tokensPss.length) return 0;
-    let hits = 0;
-    for (const t of tokensQuery) {
-      if (tokensPss.some(tp => tp.includes(t) || t.includes(tp))) hits++;
-    }
-    return hits / tokensQuery.length;
   };
 
   const buscarCoincidencias = (descripcionBuscada, semanaActual) => {
@@ -74,25 +124,21 @@ export function usePSSExistentes() {
     if (!descripcionBuscada || !pssDisponibles.length) return [];
 
     const tokensQuery = tokenizar(descripcionBuscada);
+    if (!tokensQuery.length) return [];
 
     return pssDisponibles
-      .map(pss => {
-        const score = calcularScore(tokensQuery, pss._tokens);
-        return { ...pss, score };
-      })
-      .filter(pss => pss.score > 0.3)
+      .map(pss => ({ ...pss, score: calcularScore(tokensQuery, pss._tokens) }))
+      .filter(pss => pss.score > UMBRAL_MODAL)
       .sort((a, b) => b.score - a.score)
       .slice(0, 10);
   };
 
-  // Calcula scores para un batch de filas de una vez — mucho más eficiente que llamar
-  // obtenerMejorMatch fila por fila porque reutiliza el mismo array de PSS disponibles
+  // Batch: calcula scores para todas las filas en una sola pasada
   const calcularScoresBatch = (filas, semanaFija) => {
     if (!pssExistentes.length || !filas.length) {
       return filas.map(r => ({ ...r, _matchScore: null }));
     }
 
-    // Agrupar filas por semana para no recalcular obtenerPorSemanas N veces
     const pssCache = new Map();
     const getPss = (sem) => {
       if (!pssCache.has(sem)) pssCache.set(sem, obtenerPorSemanas(sem));
@@ -111,10 +157,10 @@ export function usePSSExistentes() {
       for (const pss of pssDisponibles) {
         const score = calcularScore(tokensQuery, pss._tokens);
         if (score > mejor) mejor = score;
-        if (mejor >= 1) break; // no puede mejorar
+        if (mejor >= 1) break;
       }
 
-      return { ...row, _matchScore: mejor > 0.3 ? mejor : null };
+      return { ...row, _matchScore: mejor >= UMBRAL_BADGE ? mejor : null };
     });
   };
 

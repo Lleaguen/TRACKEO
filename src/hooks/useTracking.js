@@ -10,7 +10,8 @@ export function useTracking() {
     items.forEach((row, idx) => {
       const pss = pssAsignado[idx] || null;
       nuevosTrackeados.push({ ...row, pss });
-      if (pss) {
+      // Solo crear PSS nuevo si el usuario lo tipeo manualmente (tiene la flag _esNuevo)
+      if (pss && pss._esNuevo) {
         nuevasPss.push({
           id: Date.now() + idx,
           numero: pss.numero,
