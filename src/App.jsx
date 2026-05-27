@@ -22,16 +22,29 @@ export default function App() {
   const { buscarCoincidencias, cargarArchivo: cargarPSSExistentes, hayDatos: hayPSSExistentes } = usePSSExistentes();
 
   const [semanaSeleccionada, setSemanaSeleccionada] = useState('');
+  const [ultimas3, setUltimas3] = useState(false);
   const [seleccionados, setSeleccionados] = useState(new Set());
   const [tabActiva, setTabActiva] = useState('Búsqueda');
   const [modalPSS, setModalPSS] = useState(false);
   const [modalTrackear, setModalTrackear] = useState(null);
   const [modalCoincidencias, setModalCoincidencias] = useState(null);
 
-  const filasBase = useMemo(() => data.filter(
-    r => Number(r.Sem) === Number(semanaSeleccionada) &&
-         String(r.Recupero).trim().toUpperCase() === 'NO'
-  ), [data, semanaSeleccionada]);
+  // Últimas 3 semanas disponibles en el archivo
+  const ultimas3Semanas = useMemo(() => semanas.slice(-3), [semanas]);
+
+  const filasBase = useMemo(() => {
+    if (ultimas3) {
+      return data.filter(
+        r => ultimas3Semanas.includes(Number(r.Sem)) &&
+             String(r.Recupero).trim().toUpperCase() === 'NO'
+      );
+    }
+    if (!semanaSeleccionada) return [];
+    return data.filter(
+      r => Number(r.Sem) === Number(semanaSeleccionada) &&
+           String(r.Recupero).trim().toUpperCase() === 'NO'
+    );
+  }, [data, semanaSeleccionada, ultimas3, ultimas3Semanas]);
 
   const { filtrosActivos, setFiltrosActivos, limpiar: limpiarFiltros, hayFiltrosActivos,
           gruposFiltros, filasFiltradas, busqueda, setBusqueda } = useFiltros(filasBase);
@@ -56,7 +69,8 @@ export default function App() {
       alert('Primero cargá el archivo de PSS existentes');
       return;
     }
-    const coincidencias = buscarCoincidencias(item.Descripciones, Number(semanaSeleccionada));
+    const semanaItem = ultimas3 ? Number(item.Sem) : Number(semanaSeleccionada);
+    const coincidencias = buscarCoincidencias(item.Descripciones, semanaItem);
     setModalCoincidencias({ item, coincidencias });
   };
 
@@ -80,7 +94,7 @@ export default function App() {
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
       pssList.map(p => ({ 'Código PSS': p.codigo, 'Descripción': p.descripcion }))
     ), 'PSS');
-    XLSX.writeFile(wb, `trackeo_sem${semanaSeleccionada || 'all'}.xlsx`);
+    XLSX.writeFile(wb, `trackeo_sem${ultimas3 ? ultimas3Semanas.join('-') : (semanaSeleccionada || 'all')}.xlsx`);
   };
 
   return (
@@ -120,14 +134,41 @@ export default function App() {
           {hayPSSExistentes && <span className="text-xs text-green-600">✓</span>}
         </div>
         {semanas.length > 0 && (
-          <select
-            value={semanaSeleccionada}
-            onChange={e => { setSemanaSeleccionada(e.target.value); limpiarFiltros(); setSeleccionados(new Set()); }}
-            className="border rounded px-3 py-1.5 text-sm"
-          >
-            <option value="">-- Elegir semana --</option>
-            {semanas.map(s => <option key={s} value={s}>Semana {s}</option>)}
-          </select>
+          <div className="flex items-center gap-2">
+            <select
+              value={ultimas3 ? '' : semanaSeleccionada}
+              onChange={e => {
+                setUltimas3(false);
+                setSemanaSeleccionada(e.target.value);
+                limpiarFiltros();
+                setSeleccionados(new Set());
+              }}
+              className="border rounded px-3 py-1.5 text-sm"
+              disabled={ultimas3}
+            >
+              <option value="">-- Elegir semana --</option>
+              {semanas.map(s => <option key={s} value={s}>Semana {s}</option>)}
+            </select>
+            <button
+              onClick={() => {
+                setUltimas3(prev => !prev);
+                setSemanaSeleccionada('');
+                limpiarFiltros();
+                setSeleccionados(new Set());
+              }}
+              className={`text-sm px-3 py-1.5 rounded-full border transition-colors ${
+                ultimas3
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'
+              }`}
+              title={`Semanas ${ultimas3Semanas.join(', ')}`}
+            >
+              Últimas 3 semanas
+              {ultimas3 && ultimas3Semanas.length > 0 && (
+                <span className="ml-1 text-xs opacity-80">({ultimas3Semanas.join(', ')})</span>
+              )}
+            </button>
+          </div>
         )}
         <div className="ml-auto flex gap-2">
           <button onClick={() => setModalPSS(true)} className="bg-orange-500 text-white text-sm px-4 py-1.5 rounded-full hover:bg-orange-600">
@@ -175,7 +216,7 @@ export default function App() {
       </div>
 
       {/* Tab: Búsqueda */}
-      {tabActiva === 'Búsqueda' && semanaSeleccionada && (
+      {tabActiva === 'Búsqueda' && (semanaSeleccionada || ultimas3) && (
         <div className="flex gap-4">
           <div className="w-56 shrink-0 bg-white rounded-2xl shadow p-4">
             <div className="flex items-center justify-between mb-3">
@@ -215,6 +256,9 @@ export default function App() {
                     <p className="text-sm text-gray-700 hover:text-blue-600 transition-colors">{row.Descripciones}</p>
                     <p className="text-xs text-gray-400">
                       ID: {row.id}
+                      {row.Sem && (
+                        <span className="ml-2 font-medium text-gray-500">· Sem {row.Sem}</span>
+                      )}
                       {row['Fecha Inhub'] && (
                         <span className="ml-2">· Inhub: {XLSX.SSF.format('dd/mm/yyyy', row['Fecha Inhub'])}</span>
                       )}
